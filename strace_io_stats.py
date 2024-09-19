@@ -133,6 +133,7 @@ def new_file_access_stats_entry(filename):
     data["read_times"] = []
     data["read_sizes"] = []
     data["close_times"] = []
+    data["stat_times"] = []
     # cache values for sorting and output
     data["write_time"] = 0.0
     data["write_count"] = 0
@@ -145,6 +146,8 @@ def new_file_access_stats_entry(filename):
     data["open_from_count"] = 0
     data["close_time"] = 0.0
     data["close_count"] = 0
+    data["stat_count"] = 0.0
+    data["stat_time"] = 0
     return data
 
 
@@ -195,11 +198,15 @@ def parseInputFiles(inputfiles):
 
                 if "<unfinished ...>" in line:
                     pid = int(line.split()[0])
+                    # print("Found unfinished line for PID {} : {}".format(pid, line))
+                    # if (x := unfinished.get(None)):
+                    #     print("PID already has an unfinished line:", x)
                     unfinished[pid] = line[: -len(" <unfinished ...>")].rstrip()
                     continue
-                elif " resumed> " in line:
+                elif " resumed>" in line:
                     pid = int(line.split()[0])
-                    rest = line[line.find(" resumed> ") + len(" resumed> ") :].rstrip()
+                    # print("Found resume line for PID {} : {}".format(pid, line))
+                    rest = line[line.find(" resumed>") + len(" resumed>") :].rstrip()
                     line = unfinished[pid] + rest
                     del unfinished[pid]
                 if "execve" in line:
@@ -310,11 +317,11 @@ def parseInputFiles(inputfiles):
                     if not match:
                         continue
                     fd1 = int(match.group("fd1"))
-                    fd2 = int(match.group("fd2"))
+                    # fd2 = int(match.group("fd2"))
                     if int(match.group("ret")) == -1:
                         continue
                     filename = open_file_tracker.get_filename(fd1)
-                    open_file_tracker.register_open(filename, fd2)
+                    # open_file_tracker.register_open(filename, fd2)
                     if filename not in file_access_stats:
                         file_access_stats[filename] = new_file_access_stats_entry(
                             filename
@@ -402,10 +409,10 @@ def parseInputFiles(inputfiles):
                         match.group("mode")
                     )
                     file_access_stats[filename]["open_fds"].append([fd1, fd2])
-                elif "pipe(" in line:
+                elif "pipe(" in line or "pipe2(" in line:
                     # logging.debug("OPEN PIPE:")
                     match = re.search(
-                        r"(?P<difftime>[0-9]+\.[0-9]+) pipe\(\[(?P<fd1>[0-9]+), (?P<fd2>[0-9]+)\]\).*= (?P<ret>-?[0-9]+).*<(?P<open_time>[0-9]+\.[0-9]+)>",
+                        r"(?P<difftime>[0-9]+\.[0-9]+) pipe2?\(\[(?P<fd1>[0-9]+), (?P<fd2>[0-9]+)\],? ?(?P<mode>.*)?\).*= (?P<ret>-?[0-9]+).*<(?P<open_time>[0-9]+\.[0-9]+)>",
                         line,
                     )
                     # logging.debug("{0}".format(match.groupdict()))
@@ -422,6 +429,9 @@ def parseInputFiles(inputfiles):
                         )
                     file_access_stats[filename]["open_times"].append(
                         float(match.group("open_time"))
+                    )
+                    file_access_stats[filename]["open_modes"].append(
+                        match.group("mode")
                     )
                     file_access_stats[filename]["open_fds"].append([fd1, fd2])
                 elif "close(" in line:
@@ -462,7 +472,9 @@ def parseInputFiles(inputfiles):
                         )
                     else:
                         logging.warning(
-                            "No Open file found for file descriptor {}".format(fd)
+                            "WRITE: No Open file found for file descriptor {}".format(
+                                fd
+                            )
                         )
                 elif (
                     "read(" in line or "readv(" in line or "read64(" in line
@@ -484,8 +496,33 @@ def parseInputFiles(inputfiles):
                         )
                     else:
                         logging.warning(
-                            "No Open file found for file descriptor {}".format(fd)
+                            "READ: No Open file found for file descriptor {}".format(fd)
                         )
+                elif "stat(" in line or "fstat(" in line:
+                    # logging.debug("STAT(V):")
+                    match = re.search(
+                        r"(?P<difftime>[0-9]+\.[0-9]+) (f|l)?stat\(((?P<fd>[0-9]+)|\"(?P<filename>.*)\").*\) = (?P<result>-?[0-9]+).*<(?P<stat_time>[0-9]+\.[0-9]+)>",
+                        line,
+                    )
+                    # logging.debug("{0}".format(match.groupdict()))
+                    fd = -1
+                    if fds := match.group("fd"):
+                        fd = int(fds)
+                    filename = match.group("filename")
+                    if not filename and open_file_tracker.is_open(fd):
+                        filename = open_file_tracker.get_filename(fd)
+                    if not filename:
+                        logging.warning(
+                            "STAT: No Open file found for file descriptor {}".format(fd)
+                        )
+                        continue
+                    if filename not in file_access_stats:
+                        file_access_stats[filename] = new_file_access_stats_entry(
+                            filename
+                        )
+                    file_access_stats[filename]["stat_times"].append(
+                        float(match.group("stat_time"))
+                    )
                 else:
                     logging.debug("Unknown line type: '{}'".format(line.strip()))
                     num_ignored_lines = num_ignored_lines + 1
@@ -559,6 +596,12 @@ def calc_file_access_stats(file_access_stats):
         file_access_stats[filename]["close_count"] = len(
             file_access_stats[filename]["close_times"]
         )
+        file_access_stats[filename]["stat_time"] = sum(
+            file_access_stats[filename]["stat_times"], 0.0
+        )
+        file_access_stats[filename]["stat_count"] = len(
+            file_access_stats[filename]["stat_times"]
+        )
         file_access_stats[filename]["open_from_count"] = len(
             file_access_stats[filename]["open_from"]
         )
@@ -605,6 +648,8 @@ def main():
         "open_from_count",
         "close_time",
         "close_count",
+        "stat_time",
+        "stat_count",
     ]
     optparser.add_option(
         "--format",
@@ -612,7 +657,7 @@ def main():
             ", ".join(all_properties)
         ),
         dest="format",
-        default="write_time,write_count,write_size,read_time,read_count,read_size,open_time,open_count,open_from_count",
+        default="write_time,write_count,write_size,read_time,read_count,read_size,open_time,open_count,open_from_count,stat_time,stat_count",
     )
     optparser.add_option(
         "--unknown-call-stats",
@@ -653,9 +698,9 @@ def main():
         else:
             headerstr += property
         if property.endswith("_time") or property == "time":
-            formatstr += "{" + str(i) + ":>" + str(max(8, len(property))) + ".6}"
+            formatstr += "{" + str(i) + ":>" + str(max(10, len(property))) + ".6}"
         else:
-            formatstr += "{" + str(i) + ":>" + str(max(8, len(property))) + "}"
+            formatstr += "{" + str(i) + ":>" + str(max(10, len(property))) + "}"
     formatstr = formatstr + " {{{0}}}".format(len(properties))
     properties.append("filename")
     headerstr += " filename"
@@ -675,12 +720,17 @@ def main():
 
     print_output_section_title("I/O STATISTICS (sorted by {0})".format(sort_by))
     print(headerstr)
+    access_stats_sum = new_file_access_stats_entry("TOTAL")
     for filedata in sorted_filenames:
         filename = filedata["filename"]
+        for property in [p for p in properties if p != "filename"]:
+            access_stats_sum[property] += file_access_stats[filename][property]
         if re.match(options.filter_files, filename):
             print_file_statistics(file_access_stats[filename], formatstr, properties)
             if options.file_details:
                 save_file_details(file_access_stats[filename])
+    print()
+    print_file_statistics(access_stats_sum, formatstr, properties)
     print_output_section_footer("I/O STATISTICS")
 
     if options.unknown_call_stats:
