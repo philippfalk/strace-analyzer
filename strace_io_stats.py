@@ -320,7 +320,13 @@ def parseInputFiles(inputfiles):
                     # fd2 = int(match.group("fd2"))
                     if int(match.group("ret")) == -1:
                         continue
-                    filename = open_file_tracker.get_filename(fd1)
+                    try:
+                        filename = open_file_tracker.get_filename(fd1)
+                    except:
+                        logging.warning(
+                            "fcntl on unrecognized file descriptor {0}".format(fd1)
+                        )
+                        continue
                     # open_file_tracker.register_open(filename, fd2)
                     if filename not in file_access_stats:
                         file_access_stats[filename] = new_file_access_stats_entry(
